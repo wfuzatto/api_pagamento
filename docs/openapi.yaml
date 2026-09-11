@@ -1,0 +1,69 @@
+openapi: 3.1.0
+info:
+  title: API Pagamento
+  version: 0.1.0
+  description: Gateway central de pagamentos e conciliacao. Nunca envie PAN/CVV.
+servers:
+  - url: /api/v1
+security:
+  - apiKey: []
+paths:
+  /payment-intents:
+    post:
+      summary: Cria uma intencao de pagamento idempotente
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_module,source_reference,method,amount_cents]
+              properties:
+                source_module: {type: string}
+                source_reference: {type: string}
+                merchant_id: {type: string, default: default}
+                method: {type: string, enum: [cash,pix,debit_card,credit_card,PIX,DEBIT,CREDIT,DINHEIRO]}
+                provider: {type: string, enum: [cash,mock,getnet,rede,pagbank]}
+                amount_cents: {type: integer, minimum: 1}
+                currency: {type: string, default: BRL}
+                installments: {type: integer, minimum: 1, maximum: 24}
+                metadata: {type: object}
+      responses:
+        '201': {description: Criado}
+        '200': {description: Replay idempotente}
+  /payment-intents/{id}:
+    get:
+      summary: Consulta pagamento
+      parameters: [{in: path,name: id,required: true,schema:{type:string,format:uuid}}]
+      responses: {'200': {description: OK}}
+  /payment-intents/{id}/cash/confirm:
+    post:
+      summary: Confirma recebimento em dinheiro
+      parameters: [{in:path,name:id,required:true,schema:{type:string,format:uuid}}]
+      responses: {'200': {description: Aprovado}}
+  /payment-intents/{id}/refunds:
+    post:
+      summary: Solicita estorno total ou parcial
+      parameters:
+        - {in:path,name:id,required:true,schema:{type:string,format:uuid}}
+        - {in:header,name:Idempotency-Key,required:true,schema:{type:string}}
+      responses: {'201': {description: Estorno criado}}
+  /reconciliation/transactions:
+    get:
+      summary: Extrato normalizado para backoffice
+      responses: {'200': {description: OK}}
+  /reconciliation/settlements/import:
+    post:
+      summary: Importa liquidacoes da adquirente e cruza com pagamentos
+      responses: {'202': {description: Processado}}
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
