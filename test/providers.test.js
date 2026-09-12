@@ -1,6 +1,7 @@
 'use strict';
 const test=require('node:test');const assert=require('node:assert/strict');
 const {createProviders}=require('../src/providers');const {normalizeMethod}=require('../src/services/payment-service');
-const config={mock:{autoApprove:true,webhookSecret:'x'},acquirers:{getnet:{bridgeUrl:'',bridgeToken:'',webhookSecret:''},rede:{bridgeUrl:'',bridgeToken:'',webhookSecret:''},pagbank:{bridgeUrl:'',bridgeToken:'',webhookSecret:''}},httpTimeoutMs:1000};
+const baseConfig={mock:{autoApprove:true,webhookSecret:'x'},tef:{agentUrl:'',agentToken:'',timeoutMs:1000},acquirers:{getnet:{bridgeUrl:'',bridgeToken:'',webhookSecret:''},rede:{bridgeUrl:'',bridgeToken:'',webhookSecret:''},pagbank:{bridgeUrl:'',bridgeToken:'',webhookSecret:''}},httpTimeoutMs:1000};
 test('normalizes legacy method names',()=>{assert.equal(normalizeMethod('PIX'),'pix');assert.equal(normalizeMethod('DEBIT'),'debit_card');assert.equal(normalizeMethod('CREDIT'),'credit_card');assert.equal(normalizeMethod('DINHEIRO'),'cash');});
-test('provider registry exposes acquirers without pretending configured',()=>{const p=createProviders(config);const list=p.list();assert.equal(list.find(x=>x.name==='getnet').configured,false);assert.equal(list.find(x=>x.name==='mock').configured,true);});
+test('provider registry exposes acquirers without pretending configured',()=>{const p=createProviders(baseConfig);const list=p.list();assert.equal(list.find(x=>x.name==='getnet').configured,false);assert.equal(list.find(x=>x.name==='mock').configured,true);assert.equal(list.find(x=>x.name==='tef').configured,false);});
+test('TEF provider only supports card-present methods',()=>{const config={...baseConfig,tef:{agentUrl:'http://127.0.0.1:8766',agentToken:'secret',timeoutMs:1000}};const tef=createProviders(config).get('tef');assert.equal(tef.capabilities().configured,true);assert.deepEqual(tef.capabilities().methods,['debit_card','credit_card']);assert.equal(tef.capabilities().confirmation,true);});
