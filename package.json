@@ -2,13 +2,13 @@
   "name": "api-pagamento",
   "version": "0.2.0",
   "private": true,
-  "description": "Gateway central de pagamentos multi-modulo com PIX, dinheiro, debito, credito, adquirentes plugaveis, fila duravel e conciliacao",
+  "description": "Gateway central de pagamentos multi-modulo com PIX, dinheiro, debito, credito, TEF, adquirentes plugaveis, fila duravel e conciliacao",
   "type": "commonjs",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "check": "node --check src/server.js && node --check src/app.js && node --check src/db.js && node --check src/security.js && node --check src/services/payment-job-service.js && node --check src/services/payment-service.js && node --check src/services/reconciliation-service.js && node --check src/services/outbox-service.js",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/db.js && node --check src/security.js && node --check src/providers/tef.js && node --check src/services/payment-job-service.js && node --check src/services/payment-service.js && node --check src/services/reconciliation-service.js && node --check src/services/outbox-service.js",
     "test": "node --test test/*.test.js"
   },
   "engines": { "node": ">=22" },
