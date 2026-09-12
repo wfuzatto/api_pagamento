@@ -9,7 +9,7 @@ function createApp({ config, db, providers, paymentService, reconciliationServic
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
 
-  app.get('/', (_req,res) => res.json({ service:'api_pagamento', version:'0.1.0', status:'ok', docs:'/docs/openapi.yaml' }));
+  app.get('/', (_req,res) => res.json({ service:'api_pagamento', version:'0.2.0', status:'ok', docs:'/docs/openapi.yaml' }));
   app.get('/health', async (_req,res) => {
     try { await db.ping(); res.json({ status:'ok', service:'api_pagamento', database:'ok', time:new Date().toISOString() }); }
     catch (err) { res.status(503).json({ status:'error', service:'api_pagamento', database:'error' }); }
@@ -25,9 +25,15 @@ function createApp({ config, db, providers, paymentService, reconciliationServic
   app.use('/api/v1', auth);
 
   app.get('/api/v1/providers', (_req,res) => res.json({ providers:providers.list(), defaults:config.providers }));
+  app.get('/api/v1/terminals', async(_req,res,next)=>{ try{
+    const rows=await db.query(`SELECT t.terminal_id,t.provider,t.status,t.active_payment_id,t.lease_until,t.heartbeat_at,t.updated_at,p.status AS payment_status
+      FROM payment_terminals t LEFT JOIN payment_intents p ON p.id=t.active_payment_id ORDER BY t.terminal_id`);
+    res.json({terminals:rows.map(t=>({...t,effective_status:!t.active_payment_id||['APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','REFUNDED'].includes(String(t.payment_status||''))?'READY':t.status}))});
+  }catch(err){next(err);} });
   app.post('/api/v1/payment-intents', async(req,res,next)=>{ try{ assertNoRawCardData(req.body); const result=await paymentService.createPayment(req.body,req.headers['idempotency-key']); res.status(result.idempotent_replay?200:201).json(result); }catch(err){next(err);} });
   app.get('/api/v1/payment-intents/:id', async(req,res,next)=>{ try{res.json(await paymentService.getPayment(req.params.id));}catch(err){next(err);} });
   app.get('/api/v1/payment-intents/:id/events', async(req,res,next)=>{ try{ const payment=await paymentService.getPayment(req.params.id); res.json({payment_id:payment.id,events:await paymentService.listEvents(req.params.id)}); }catch(err){next(err);} });
+  app.post('/api/v1/payment-intents/:id/confirm', async(req,res,next)=>{ try{res.json(await paymentService.confirmPayment(req.params.id));}catch(err){next(err);} });
   app.post('/api/v1/payment-intents/:id/cancel', async(req,res,next)=>{ try{res.json(await paymentService.cancelPayment(req.params.id));}catch(err){next(err);} });
   app.post('/api/v1/payment-intents/:id/cash/confirm', async(req,res,next)=>{ try{res.json(await paymentService.confirmCash(req.params.id,req.body||{}));}catch(err){next(err);} });
   app.post('/api/v1/payment-intents/:id/refunds', async(req,res,next)=>{ try{res.status(201).json(await paymentService.refundPayment(req.params.id,req.body||{},req.headers['idempotency-key']));}catch(err){next(err);} });

@@ -2,11 +2,13 @@
 const { MockProvider } = require('./mock');
 const { CashProvider } = require('./cash');
 const { HttpAcquirerProvider } = require('./http-acquirer');
+const { TefProvider } = require('./tef');
 
 function createProviders(config) {
   const providers = new Map();
   providers.set('mock', new MockProvider(config));
   providers.set('cash', new CashProvider());
+  providers.set('tef', new TefProvider(config));
   for (const name of ['getnet', 'rede', 'pagbank']) providers.set(name, new HttpAcquirerProvider(name, config.acquirers[name], config));
 
   function get(name) {
