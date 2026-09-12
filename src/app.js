@@ -25,6 +25,11 @@ function createApp({ config, db, providers, paymentService, reconciliationServic
   app.use('/api/v1', auth);
 
   app.get('/api/v1/providers', (_req,res) => res.json({ providers:providers.list(), defaults:config.providers }));
+  app.get('/api/v1/terminals', async(_req,res,next)=>{ try{
+    const rows=await db.query(`SELECT t.terminal_id,t.provider,t.status,t.active_payment_id,t.lease_until,t.heartbeat_at,t.updated_at,p.status AS payment_status
+      FROM payment_terminals t LEFT JOIN payment_intents p ON p.id=t.active_payment_id ORDER BY t.terminal_id`);
+    res.json({terminals:rows.map(t=>({...t,effective_status:!t.active_payment_id||['APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','REFUNDED'].includes(String(t.payment_status||''))?'READY':t.status}))});
+  }catch(err){next(err);} });
   app.post('/api/v1/payment-intents', async(req,res,next)=>{ try{ assertNoRawCardData(req.body); const result=await paymentService.createPayment(req.body,req.headers['idempotency-key']); res.status(result.idempotent_replay?200:201).json(result); }catch(err){next(err);} });
   app.get('/api/v1/payment-intents/:id', async(req,res,next)=>{ try{res.json(await paymentService.getPayment(req.params.id));}catch(err){next(err);} });
   app.get('/api/v1/payment-intents/:id/events', async(req,res,next)=>{ try{ const payment=await paymentService.getPayment(req.params.id); res.json({payment_id:payment.id,events:await paymentService.listEvents(req.params.id)}); }catch(err){next(err);} });
