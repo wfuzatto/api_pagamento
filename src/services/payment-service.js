@@ -3,8 +3,8 @@ const crypto = require('crypto');
 const { assertNoRawCardData, sanitizeForStorage, requestHash } = require('../security');
 
 const METHODS = new Set(['cash', 'pix', 'debit_card', 'credit_card']);
-const PROVIDER_STATUSES = new Set(['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN']);
-const WEBHOOK_STATUSES = new Set(['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN','REFUNDED','PARTIALLY_REFUNDED']);
+const PROVIDER_STATUSES = new Set(['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN']);
+const WEBHOOK_STATUSES = new Set(['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN','REFUNDED','PARTIALLY_REFUNDED']);
 const TERMINAL_STATUSES = new Set(['APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','REFUNDED']);
 
 function normalizeMethod(input) {
@@ -37,10 +37,11 @@ function serializePayment(row) {
 function canTransition(from, to) {
   if (!from || from === to) return true;
   const allowed = {
-    CREATED: ['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
-    PENDING: ['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
-    UNKNOWN: ['UNKNOWN','PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR'],
-    ACTION_REQUIRED: ['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
+    CREATED: ['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
+    PENDING: ['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
+    UNKNOWN: ['UNKNOWN','PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR'],
+    ACTION_REQUIRED: ['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
+    AUTHORIZED: ['AUTHORIZED','APPROVED','CANCELED','ERROR','UNKNOWN'],
     ERROR: ['PENDING','UNKNOWN','CANCELED'],
     APPROVED: ['PARTIALLY_REFUNDED','REFUNDED'],
     PARTIALLY_REFUNDED: ['PARTIALLY_REFUNDED','REFUNDED']
@@ -74,6 +75,13 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
       }
       const updates = ['status=?', 'provider_data_json=?'];
       const params = [toStatus, JSON.stringify(safePayload)];
+      let nextAction;
+      if (safePayload && Object.prototype.hasOwnProperty.call(safePayload, 'next_action')) nextAction = safePayload.next_action;
+      else if (['APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','REFUNDED'].includes(toStatus)) nextAction = null;
+      if (nextAction !== undefined) {
+        updates.push('next_action_json=?');
+        params.push(nextAction === null ? null : JSON.stringify(nextAction));
+      }
       if (toStatus === 'APPROVED') updates.push('approved_at=COALESCE(approved_at,CURRENT_TIMESTAMP(3))');
       if (toStatus === 'CANCELED') updates.push('canceled_at=COALESCE(canceled_at,CURRENT_TIMESTAMP(3))');
       params.push(paymentId);
@@ -165,10 +173,25 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
     return { ...serializePayment(row), refunds: refunds.map(r => ({ ...r, amount_cents: Number(r.amount_cents) })) };
   }
 
+  async function confirmPayment(id) {
+    const row = await getById(id);
+    if (!row) { const err = new Error('Payment not found'); err.code='PAYMENT_NOT_FOUND'; err.status=404; throw err; }
+    if (row.status === 'APPROVED') return getPayment(id);
+    const provider = providers.get(row.provider);
+    if (!provider.capabilities().confirmation) { const err = new Error(`${row.provider} does not require/support confirmation`); err.code='CONFIRMATION_NOT_SUPPORTED'; err.status=422; throw err; }
+    if (row.status !== 'AUTHORIZED') { const err = new Error(`Cannot confirm payment in ${row.status}`); err.code='INVALID_PAYMENT_STATE'; err.status=409; throw err; }
+    if (!row.external_id) { const err = new Error('Payment has no provider transaction id'); err.code='PROVIDER_TRANSACTION_MISSING'; err.status=409; throw err; }
+    const result = await provider.confirmPayment(row);
+    const status = normalizeStatus(result.status);
+    if (status !== 'APPROVED') { const err = new Error(`Provider confirmation returned ${status}`); err.code='CONFIRMATION_FAILED'; err.status=502; throw err; }
+    await recordStatusChange(id, status, 'payment.confirm', row.provider, { ...(result.providerData || {}), next_action: null });
+    return getPayment(id);
+  }
+
   async function cancelPayment(id) {
     const row = await getById(id);
     if (!row) { const err = new Error('Payment not found'); err.code='PAYMENT_NOT_FOUND'; err.status=404; throw err; }
-    if (!['CREATED','PENDING','ACTION_REQUIRED','UNKNOWN','ERROR'].includes(row.status)) { const err = new Error(`Cannot cancel payment in ${row.status}`); err.code='INVALID_PAYMENT_STATE'; err.status=409; throw err; }
+    if (!['CREATED','PENDING','ACTION_REQUIRED','AUTHORIZED','UNKNOWN','ERROR'].includes(row.status)) { const err = new Error(`Cannot cancel payment in ${row.status}`); err.code='INVALID_PAYMENT_STATE'; err.status=409; throw err; }
     if (!row.external_id) {
       await db.transaction(async conn => {
         const [locked] = await conn.execute('SELECT * FROM payment_intents WHERE id=? FOR UPDATE', [id]);
@@ -183,7 +206,7 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
     }
     const result = await providers.get(row.provider).cancelPayment(row);
     const status = normalizeStatus(result.status);
-    await recordStatusChange(id, status, 'payment.cancel', row.provider, result.providerData || {});
+    await recordStatusChange(id, status, 'payment.cancel', row.provider, { ...(result.providerData || {}), next_action: null });
     return getPayment(id);
   }
 
@@ -241,7 +264,7 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
       const approvedRefunds = await db.query('SELECT COALESCE(SUM(amount_cents),0) AS total FROM refunds WHERE payment_id=? AND status="APPROVED"', [id]);
       const totalRefunded = Number(approvedRefunds[0].total || 0);
       const paymentStatus = totalRefunded >= Number(paymentRow.amount_cents) ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
-      await recordStatusChange(id, paymentStatus, 'payment.refund.approved', paymentRow.provider, { refund_id: refund.id, amount_cents: refund.amountCents });
+      await recordStatusChange(id, paymentStatus, 'payment.refund.approved', paymentRow.provider, { refund_id: refund.id, amount_cents: refund.amountCents, next_action: null });
       if (paymentRow.method === 'cash') await db.query('INSERT INTO cash_movements (id,payment_id,merchant_id,movement_type,amount_cents,metadata_json) VALUES (?,?,?,?,?,?)', [crypto.randomUUID(), id, paymentRow.merchant_id, 'REFUND', -refund.amountCents, JSON.stringify({ refund_id: refund.id })]);
     }
     const [refundRow] = await db.query('SELECT id,payment_id,amount_cents,status,external_id,reason,created_at,updated_at FROM refunds WHERE id=?', [refund.id]);
@@ -264,12 +287,12 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
     const row = event.paymentId ? await getById(event.paymentId) : await getByExternal(providerName, event.externalId);
     if (!row) return { duplicate:false, unmatched:true, provider_event_id:event.providerEventId };
     if (event.externalId && !row.external_id) await db.query('UPDATE payment_intents SET external_id=? WHERE id=? AND external_id IS NULL', [event.externalId,row.id]);
-    if (row.status !== status) await recordStatusChange(row.id, status, 'provider.webhook', providerName, event.details || {}, event.providerEventId);
+    await recordStatusChange(row.id, status, 'provider.webhook', providerName, event.details || {}, event.providerEventId);
     await db.query('UPDATE webhook_receipts SET processed_at=CURRENT_TIMESTAMP(3) WHERE provider=? AND provider_event_id=?', [providerName, event.providerEventId]);
     return { duplicate: false, payment: await getPayment(row.id) };
   }
 
-  return { createPayment, getPayment, listEvents, cancelPayment, confirmCash, refundPayment, handleWebhook, serializePayment, normalizeMethod, applyProviderCreateResult, markProcessingFailure };
+  return { createPayment, getPayment, listEvents, confirmPayment, cancelPayment, confirmCash, refundPayment, handleWebhook, serializePayment, normalizeMethod, applyProviderCreateResult, markProcessingFailure };
 }
 
 module.exports = { createPaymentService, normalizeMethod, serializePayment };
