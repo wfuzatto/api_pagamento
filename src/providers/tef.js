@@ -140,11 +140,14 @@ class TefProvider extends PaymentProvider {
   normalizeWebhook(body) {
     const terminalId = body.terminal_id || body.details?.terminal_id || null;
     const agentStatus = String(body.status || '').toUpperCase();
+    // Refund bookkeeping belongs to /refunds. The agent's REFUNDED callback is
+    // recorded as an informational same-state event so it cannot race the refund row.
+    const paymentStatus = agentStatus === 'REFUNDED' ? 'APPROVED' : mapAgentStatus(agentStatus);
     return {
       providerEventId: String(body.event_id || crypto.randomUUID()),
       externalId: body.external_id ? String(body.external_id) : null,
       paymentId: body.payment_id ? String(body.payment_id) : null,
-      status: mapAgentStatus(agentStatus),
+      status: paymentStatus,
       details: {
         ...(body.details || {}),
         terminal_id: terminalId,
