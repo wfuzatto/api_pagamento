@@ -3,8 +3,8 @@ const crypto = require('crypto');
 const { assertNoRawCardData, sanitizeForStorage, requestHash } = require('../security');
 
 const METHODS = new Set(['cash', 'pix', 'debit_card', 'credit_card']);
-const PROVIDER_STATUSES = new Set(['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN']);
-const WEBHOOK_STATUSES = new Set(['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN','REFUNDED','PARTIALLY_REFUNDED']);
+const PROVIDER_STATUSES = new Set(['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN']);
+const WEBHOOK_STATUSES = new Set(['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN','REFUNDED','PARTIALLY_REFUNDED']);
 const TERMINAL_STATUSES = new Set(['APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','REFUNDED']);
 
 function normalizeMethod(input) {
@@ -37,10 +37,11 @@ function serializePayment(row) {
 function canTransition(from, to) {
   if (!from || from === to) return true;
   const allowed = {
-    CREATED: ['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
-    PENDING: ['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
-    UNKNOWN: ['UNKNOWN','PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR'],
-    ACTION_REQUIRED: ['PENDING','ACTION_REQUIRED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
+    CREATED: ['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
+    PENDING: ['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
+    UNKNOWN: ['UNKNOWN','PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR'],
+    ACTION_REQUIRED: ['PENDING','ACTION_REQUIRED','AUTHORIZED','APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','UNKNOWN'],
+    AUTHORIZED: ['AUTHORIZED','APPROVED','CANCELED','ERROR','UNKNOWN'],
     ERROR: ['PENDING','UNKNOWN','CANCELED'],
     APPROVED: ['PARTIALLY_REFUNDED','REFUNDED'],
     PARTIALLY_REFUNDED: ['PARTIALLY_REFUNDED','REFUNDED']
@@ -99,6 +100,7 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
     const providerName = String(input.provider || config.providers[method] || '').toLowerCase();
     const provider = providers.get(providerName);
     if (!provider.capabilities().methods.includes(method)) { const err = new Error(`${providerName} does not support ${method}`); err.code='METHOD_NOT_SUPPORTED_BY_PROVIDER'; err.status=422; throw err; }
+    if (providerName === 'tef' && !String(input.metadata?.terminal_id || input.metadata?.pinpad_id || '').trim()) { const err = new Error('terminal_id is required for TEF'); err.code='TEF_TERMINAL_REQUIRED'; err.status=422; throw err; }
 
     const normalizedRequest = {
       source_module: sourceModule, source_reference: sourceReference, merchant_id: String(input.merchant_id || 'default'),
@@ -133,7 +135,7 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
     return { payment: serializePayment(await getById(id)), idempotent_replay: false };
   }
 
-  async function applyProviderCreateResult(id, result) {
+  async function applyProviderCreateResult(id, result, eventType = 'provider.create.result') {
     const status = normalizeStatus(result.status);
     const safeProviderData = sanitizeForStorage(result.providerData || {});
     return db.transaction(async conn => {
@@ -144,7 +146,7 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
       const fromStatus = String(row.status);
       if (!canTransition(fromStatus, status)) return serializePayment(row);
       await conn.execute('UPDATE payment_intents SET status=?, external_id=COALESCE(?,external_id), next_action_json=?, provider_data_json=?, approved_at=IF(?="APPROVED",COALESCE(approved_at,CURRENT_TIMESTAMP(3)),approved_at) WHERE id=?', [status, result.externalId || null, result.nextAction ? JSON.stringify(result.nextAction) : null, JSON.stringify(safeProviderData), status, id]);
-      await conn.execute('INSERT INTO payment_events (payment_id,provider,event_type,from_status,to_status,payload_json) VALUES (?,?,?,?,?,?)', [id, row.provider, 'provider.create.result', fromStatus, status, JSON.stringify(safeProviderData)]);
+      await conn.execute('INSERT INTO payment_events (payment_id,provider,event_type,from_status,to_status,payload_json) VALUES (?,?,?,?,?,?)', [id, row.provider, eventType, fromStatus, status, JSON.stringify(safeProviderData)]);
       const [fresh] = await conn.execute('SELECT * FROM payment_intents WHERE id=?', [id]);
       if (fromStatus !== status) await outbox.enqueue(conn, `payment.${status.toLowerCase()}`, id, serializePayment(fresh[0]));
       return serializePayment(fresh[0]);
@@ -158,17 +160,46 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
     return recordStatusChange(id, target, exhausted ? 'provider.processing.exhausted' : 'provider.processing.retry', row.provider, { code:error.code || 'PROVIDER_ERROR', message:String(error.message || error).slice(0,500) });
   }
 
+  async function syncProviderState(row) {
+    if (!row || row.provider !== 'tef' || !row.external_id || !['PENDING','ACTION_REQUIRED','AUTHORIZED','UNKNOWN'].includes(String(row.status))) return row;
+    const provider = providers.get('tef');
+    try {
+      const result = await provider.getTransaction(row.external_id);
+      await applyProviderCreateResult(row.id, result, 'provider.sync.result');
+      return await getById(row.id);
+    } catch (err) {
+      console.warn('[api_pagamento] TEF sync failed', row.id, err.code || err.message);
+      return row;
+    }
+  }
+
   async function getPayment(id) {
-    const row = await getById(id);
+    let row = await getById(id);
     if (!row) { const err = new Error('Payment not found'); err.code='PAYMENT_NOT_FOUND'; err.status=404; throw err; }
+    row = await syncProviderState(row);
     const refunds = await db.query('SELECT id,amount_cents,status,external_id,reason,created_at,updated_at FROM refunds WHERE payment_id=? ORDER BY created_at ASC', [id]);
     return { ...serializePayment(row), refunds: refunds.map(r => ({ ...r, amount_cents: Number(r.amount_cents) })) };
   }
 
-  async function cancelPayment(id) {
-    const row = await getById(id);
+  async function confirmPayment(id) {
+    let row = await getById(id);
     if (!row) { const err = new Error('Payment not found'); err.code='PAYMENT_NOT_FOUND'; err.status=404; throw err; }
-    if (!['CREATED','PENDING','ACTION_REQUIRED','UNKNOWN','ERROR'].includes(row.status)) { const err = new Error(`Cannot cancel payment in ${row.status}`); err.code='INVALID_PAYMENT_STATE'; err.status=409; throw err; }
+    row = await syncProviderState(row);
+    if (row.status === 'APPROVED') return getPayment(id);
+    if (row.provider !== 'tef') { const err = new Error('Provider does not require TEF confirmation'); err.code='CONFIRMATION_NOT_SUPPORTED'; err.status=422; throw err; }
+    if (row.status !== 'AUTHORIZED') { const err = new Error(`Cannot confirm payment in ${row.status}`); err.code='INVALID_PAYMENT_STATE'; err.status=409; throw err; }
+    const result = await providers.get('tef').confirmPayment(row);
+    const status = normalizeStatus(result.status);
+    if (status !== 'APPROVED') { const err = new Error(`TEF confirmation returned ${status}`); err.code='TEF_CONFIRMATION_FAILED'; err.status=502; throw err; }
+    await applyProviderCreateResult(id, result, 'payment.confirm');
+    return getPayment(id);
+  }
+
+  async function cancelPayment(id) {
+    let row = await getById(id);
+    if (!row) { const err = new Error('Payment not found'); err.code='PAYMENT_NOT_FOUND'; err.status=404; throw err; }
+    row = await syncProviderState(row);
+    if (!['CREATED','PENDING','ACTION_REQUIRED','AUTHORIZED','UNKNOWN','ERROR'].includes(row.status)) { const err = new Error(`Cannot cancel payment in ${row.status}`); err.code='INVALID_PAYMENT_STATE'; err.status=409; throw err; }
     if (!row.external_id) {
       await db.transaction(async conn => {
         const [locked] = await conn.execute('SELECT * FROM payment_intents WHERE id=? FOR UPDATE', [id]);
@@ -183,7 +214,7 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
     }
     const result = await providers.get(row.provider).cancelPayment(row);
     const status = normalizeStatus(result.status);
-    await recordStatusChange(id, status, 'payment.cancel', row.provider, result.providerData || {});
+    await applyProviderCreateResult(id, result, 'payment.cancel');
     return getPayment(id);
   }
 
@@ -269,7 +300,7 @@ function createPaymentService({ db, config, providers, outbox, jobs }) {
     return { duplicate: false, payment: await getPayment(row.id) };
   }
 
-  return { createPayment, getPayment, listEvents, cancelPayment, confirmCash, refundPayment, handleWebhook, serializePayment, normalizeMethod, applyProviderCreateResult, markProcessingFailure };
+  return { createPayment, getPayment, listEvents, confirmPayment, cancelPayment, confirmCash, refundPayment, handleWebhook, serializePayment, normalizeMethod, applyProviderCreateResult, markProcessingFailure };
 }
 
 module.exports = { createPaymentService, normalizeMethod, serializePayment };
