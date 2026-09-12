@@ -38,6 +38,13 @@ module.exports = {
     autoApprove: bool(process.env.PAYMENT_MOCK_AUTO_APPROVE, true),
     webhookSecret: process.env.PAYMENT_MOCK_WEBHOOK_SECRET || ''
   },
+  tef: {
+    agentUrl: process.env.PAYMENT_TEF_AGENT_URL || '',
+    agentToken: process.env.PAYMENT_TEF_AGENT_TOKEN || '',
+    webhookSecret: process.env.PAYMENT_TEF_WEBHOOK_SECRET || '',
+    defaultTerminalId: process.env.PAYMENT_TEF_DEFAULT_TERMINAL_ID || '',
+    timeoutMs: integer(process.env.PAYMENT_TEF_TIMEOUT_MS, 10000)
+  },
   acquirers: {
     getnet: providerConfig('GETNET'),
     rede: providerConfig('REDE'),
