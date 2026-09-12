@@ -99,6 +99,19 @@ function createDb(config) {
         KEY ix_payment_jobs_resource (resource_key, status),
         CONSTRAINT fk_jobs_payment FOREIGN KEY (payment_id) REFERENCES payment_intents(id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+      `CREATE TABLE IF NOT EXISTS payment_terminals (
+        terminal_id VARCHAR(96) PRIMARY KEY,
+        provider VARCHAR(32) NOT NULL DEFAULT 'tef',
+        status VARCHAR(32) NOT NULL DEFAULT 'READY',
+        active_payment_id CHAR(36) NULL,
+        lease_until DATETIME(3) NULL,
+        heartbeat_at DATETIME(3) NULL,
+        metadata_json JSON NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        KEY ix_terminal_active (active_payment_id),
+        KEY ix_terminal_status (provider, status, updated_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
       `CREATE TABLE IF NOT EXISTS refunds (
         id CHAR(36) PRIMARY KEY,
         payment_id CHAR(36) NOT NULL,
