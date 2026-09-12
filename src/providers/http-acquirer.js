@@ -29,7 +29,7 @@ class HttpAcquirerProvider extends PaymentProvider {
     try {
       const response = await fetch(`${this.providerConfig.bridgeUrl.replace(/\/$/, '')}${path}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.providerConfig.bridgeToken}` },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.providerConfig.bridgeToken}`, 'idempotency-key': String(payload.payment_id || payload.refund_id || '') },
         body: JSON.stringify(payload), signal: controller.signal
       });
       const text = await response.text();
@@ -57,7 +57,7 @@ class HttpAcquirerProvider extends PaymentProvider {
   }
   async refundPayment(intent, refund) {
     const data = await this.request(`/v1/payments/${encodeURIComponent(intent.external_id)}/refunds`, {
-      refund_id: refund.id, amount_cents: refund.amountCents, reason: refund.reason || null
+      payment_id: intent.id, refund_id: refund.id, amount_cents: refund.amountCents, reason: refund.reason || null
     });
     return { status: String(data.status || 'PENDING').toUpperCase(), externalId: data.external_id, providerData: data };
   }
@@ -68,7 +68,13 @@ class HttpAcquirerProvider extends PaymentProvider {
     if (!body || !body.event_id || !body.external_id || !body.status) {
       const err = new Error('Invalid normalized acquirer webhook'); err.code = 'INVALID_WEBHOOK'; err.status = 422; throw err;
     }
-    return { providerEventId: String(body.event_id), externalId: String(body.external_id), status: String(body.status).toUpperCase(), details: body.details || {} };
+    return {
+      providerEventId: String(body.event_id),
+      paymentId: body.payment_id ? String(body.payment_id) : null,
+      externalId: String(body.external_id),
+      status: String(body.status).toUpperCase(),
+      details: body.details || {}
+    };
   }
 }
 
