@@ -34,6 +34,11 @@ module.exports = {
     debit_card: process.env.PAYMENT_PROVIDER_DEBIT || 'mock',
     credit_card: process.env.PAYMENT_PROVIDER_CREDIT || 'mock'
   },
+  tef: {
+    agentUrl: process.env.TEF_AGENT_URL || '',
+    agentToken: process.env.TEF_AGENT_TOKEN || '',
+    timeoutMs: Math.max(1000, integer(process.env.TEF_AGENT_TIMEOUT_MS, 5000))
+  },
   mock: {
     autoApprove: bool(process.env.PAYMENT_MOCK_AUTO_APPROVE, true),
     webhookSecret: process.env.PAYMENT_MOCK_WEBHOOK_SECRET || ''
