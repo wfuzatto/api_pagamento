@@ -79,6 +79,26 @@ function createDb(config) {
         KEY ix_events_payment (payment_id, id),
         CONSTRAINT fk_events_payment FOREIGN KEY (payment_id) REFERENCES payment_intents(id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+      `CREATE TABLE IF NOT EXISTS payment_jobs (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        payment_id CHAR(36) NOT NULL,
+        job_type VARCHAR(32) NOT NULL,
+        resource_key VARCHAR(190) NULL,
+        status VARCHAR(24) NOT NULL DEFAULT 'READY',
+        attempts INT UNSIGNED NOT NULL DEFAULT 0,
+        max_attempts INT UNSIGNED NOT NULL DEFAULT 12,
+        run_after DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        locked_by VARCHAR(80) NULL,
+        locked_at DATETIME(3) NULL,
+        last_error VARCHAR(500) NULL,
+        payload_json JSON NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uq_payment_job (payment_id, job_type),
+        KEY ix_payment_jobs_ready (status, run_after, id),
+        KEY ix_payment_jobs_resource (resource_key, status),
+        CONSTRAINT fk_jobs_payment FOREIGN KEY (payment_id) REFERENCES payment_intents(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
       `CREATE TABLE IF NOT EXISTS refunds (
         id CHAR(36) PRIMARY KEY,
         payment_id CHAR(36) NOT NULL,
