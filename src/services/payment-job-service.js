@@ -7,9 +7,14 @@ function createPaymentJobService({ db, config, providers, outbox }) {
   let running = 0;
   let paymentService = null;
   const workerId = `${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  const paymentFinalStates = new Set(['APPROVED','DECLINED','CANCELED','EXPIRED','ERROR','REFUNDED']);
+
+  function terminalIdFrom(metadata = {}) {
+    return String(metadata.terminal_id || metadata.pinpad_id || metadata.device_id || '').trim();
+  }
 
   function resourceKey(payment, metadata = {}) {
-    const terminalId = String(metadata.terminal_id || metadata.pinpad_id || metadata.device_id || '').trim();
+    const terminalId = terminalIdFrom(metadata);
     if (!terminalId) return null;
     return `${payment.merchant_id || 'default'}:${payment.provider}:${terminalId}`.slice(0, 190);
   }
@@ -20,6 +25,59 @@ function createPaymentJobService({ db, config, providers, outbox }) {
        VALUES (?,?,?,?,0,?,CURRENT_TIMESTAMP(3),?)`,
       [payment.id, 'AUTHORIZE', resourceKey(payment, metadata), 'READY', config.jobs.maxAttempts, JSON.stringify({ metadata: sanitizeForStorage(metadata) })]
     );
+  }
+
+  async function acquireTefTerminal(payment, metadata) {
+    if (payment.provider !== 'tef') return;
+    const terminalId = terminalIdFrom(metadata);
+    if (!terminalId) {
+      const err = new Error('terminal_id is required for TEF');
+      err.code = 'TEF_TERMINAL_REQUIRED'; err.status = 422;
+      throw err;
+    }
+    await db.transaction(async conn => {
+      await conn.execute(
+        `INSERT INTO payment_terminals (terminal_id,provider,status,metadata_json)
+         VALUES (?,'tef','READY',?)
+         ON DUPLICATE KEY UPDATE provider='tef', metadata_json=VALUES(metadata_json)`,
+        [terminalId, JSON.stringify(sanitizeForStorage({ merchant_id:payment.merchant_id || null }))]
+      );
+      const [rows] = await conn.execute('SELECT * FROM payment_terminals WHERE terminal_id=? FOR UPDATE', [terminalId]);
+      const terminal = rows[0];
+      if (terminal?.active_payment_id && terminal.active_payment_id !== payment.id) {
+        const [activeRows] = await conn.execute('SELECT status FROM payment_intents WHERE id=? LIMIT 1', [terminal.active_payment_id]);
+        const activeStatus = String(activeRows[0]?.status || 'UNKNOWN');
+        if (!paymentFinalStates.has(activeStatus)) {
+          const err = new Error(`TEF terminal busy: ${terminalId}`);
+          err.code = 'TEF_TERMINAL_BUSY'; err.status = 409; err.retryable = true;
+          throw err;
+        }
+      }
+      await conn.execute(
+        `UPDATE payment_terminals
+         SET status='BUSY',active_payment_id=?,heartbeat_at=CURRENT_TIMESTAMP(3),lease_until=DATE_ADD(CURRENT_TIMESTAMP(3),INTERVAL 10 MINUTE)
+         WHERE terminal_id=?`,
+        [payment.id, terminalId]
+      );
+    });
+  }
+
+  async function reflectTefTerminal(payment, metadata, result) {
+    if (payment.provider !== 'tef') return;
+    const terminalId = terminalIdFrom(metadata);
+    if (!terminalId) return;
+    const status = String(result?.status || 'UNKNOWN').toUpperCase();
+    if (paymentFinalStates.has(status)) {
+      await db.query(
+        `UPDATE payment_terminals SET status='READY',active_payment_id=NULL,heartbeat_at=CURRENT_TIMESTAMP(3),lease_until=NULL
+         WHERE terminal_id=? AND active_payment_id=?`, [terminalId, payment.id]
+      );
+    } else {
+      await db.query(
+        `UPDATE payment_terminals SET status=?,heartbeat_at=CURRENT_TIMESTAMP(3),lease_until=DATE_ADD(CURRENT_TIMESTAMP(3),INTERVAL 10 MINUTE)
+         WHERE terminal_id=? AND active_payment_id=?`, [status, terminalId, payment.id]
+      );
+    }
   }
 
   async function markDone(jobId) {
@@ -86,15 +144,17 @@ function createPaymentJobService({ db, config, providers, outbox }) {
     const rows = await db.query('SELECT * FROM payment_intents WHERE id=? LIMIT 1', [job.payment_id]);
     const payment = rows[0];
     if (!payment) return markDone(job.id);
-    if (['APPROVED','DECLINED','CANCELED','EXPIRED','REFUNDED'].includes(String(payment.status))) return markDone(job.id);
+    if (paymentFinalStates.has(String(payment.status))) return markDone(job.id);
 
     const payload = typeof job.payload_json === 'string' ? JSON.parse(job.payload_json || '{}') : (job.payload_json || {});
     const metadata = payload.metadata || {};
     try {
       await withResourceLock(job.resource_key, async () => {
+        await acquireTefTerminal(payment, metadata);
         const provider = providers.get(payment.provider);
         const result = await provider.createPayment({ ...payment, metadata });
         await paymentService.applyProviderCreateResult(payment.id, result);
+        await reflectTefTerminal(payment, metadata, result);
       });
       await markDone(job.id);
     } catch (error) {
