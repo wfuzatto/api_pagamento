@@ -64,11 +64,14 @@ class TefProvider extends PaymentProvider {
 
   normalizeTransaction(data) {
     const status = String(data.status || 'PENDING').toUpperCase();
-    const nextAction = data.next_action || (['WAITING_TERMINAL','WAITING_CARD','CARD_READ','WAITING_PIN','PROCESSING','AUTHORIZED'].includes(status)
+    const interactive = ['WAITING_TERMINAL','WAITING_CARD','CARD_READ','WAITING_PIN','PROCESSING'];
+    const recovery = status === 'RECOVERY_REQUIRED';
+    const nextAction = data.next_action || ((interactive.includes(status) || status === 'AUTHORIZED' || recovery)
       ? { type:'TERMINAL', state: status, terminal_id: data.terminal_id || null }
       : null);
     const mappedStatus = status === 'AUTHORIZED' ? 'AUTHORIZED' :
-      ['WAITING_TERMINAL','WAITING_CARD','CARD_READ','WAITING_PIN','PROCESSING'].includes(status) ? 'ACTION_REQUIRED' : status;
+      recovery ? 'UNKNOWN' :
+      interactive.includes(status) ? 'ACTION_REQUIRED' : status;
     return {
       status: mappedStatus,
       externalId: data.id || data.transaction_id || data.external_id || null,
@@ -76,6 +79,7 @@ class TefProvider extends PaymentProvider {
       providerData: {
         terminal_id: data.terminal_id || null,
         tef_status: status,
+        recovery_required: recovery,
         authorization_code: data.authorization_code || null,
         nsu: data.nsu || null,
         network: data.network || null,
