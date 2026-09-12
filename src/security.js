@@ -3,8 +3,9 @@ const crypto = require('crypto');
 
 const FORBIDDEN_CARD_KEYS = new Set([
   'pan', 'cardnumber', 'card_number', 'card-number', 'cvv', 'cvc', 'cvv2', 'cvc2',
-  'securitycode', 'security_code', 'track1', 'track2', 'magstripe', 'magneticstripe',
-  'rawcard', 'raw_card'
+  'securitycode', 'security_code', 'track1', 'track2', 'trackdata', 'track_data',
+  'magstripe', 'magneticstripe', 'rawcard', 'raw_card',
+  'pin', 'pinblock', 'pin_block', 'encryptedpin', 'encrypted_pin'
 ]);
 
 function normalizeKey(key) {
